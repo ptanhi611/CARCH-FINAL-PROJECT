@@ -1,0 +1,123 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- BASIC SETUP ---
+% Use standard pdflatex-compatible fonts
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern} % Use Latin Modern (similar to Computer Modern)
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm]{geometry}
+
+% --- USEFUL PACKAGES ---
+\usepackage{booktabs}   % For professional tables
+\usepackage{enumitem}   % For customized lists
+\usepackage{microtype}  % Better text spacing
+\usepackage[dvipsnames,svgnames]{xcolor} % Grayscale colors
+\usepackage{parskip}    % Add space between paragraphs instead of indent
+
+% --- HEADINGS STYLE ---
+\usepackage{titlesec}
+% Use the standard sans-serif font (LMSans)
+\titleformat{\section}{\normalfont\sffamily\Large\bfseries\color{Black}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalfont\sffamily\large\bfseries\color{Black!70}}{\thesubsection}{1em}{}
+
+% --- LINKS ---
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=Black,
+    filecolor=Black,
+    urlcolor=Black!70,
+    pdftitle={RISC-V Pipeline Pre-final Report},
+    pdfpagemode=FullScreen,
+}
+% --- END PREAMBLE ---
+
+% --- TITLE INFO ---
+\title{
+    \sffamily\bfseries\huge % Sans-serif title
+    Pre-final Implementation Status Report \vspace{0.25cm} \\ % New Title
+    \Large RISC-V Simulator Pipelining
+}
+\author{\sffamily Rishit Mittal \\ Roll No: CS24BTECH11053}
+\date{\sffamily \today}
+
+\begin{document}
+
+\begin{titlepage}
+    \maketitle
+    \vfill
+    \begin{center}
+        \sffamily\large
+        Project Status Report
+    \end{center}
+\end{titlepage}
+
+\section*{Abstract}
+\noindent
+This report details the successful implementation of a multi-mode, 5-stage pipelined processor, evolving from the previous single-cycle design. The simulator now supports six distinct execution modes (0-5), correctly handling data hazards (via stalling and forwarding) and control hazards (via static and dynamic branch prediction). The core logic has been heavily refactored for simulation accuracy, notably by implementing a "double-buffered" pipeline register system to prevent race conditions. All integer and branch instructions are now correctly processed. The next steps are to add support for complex instructions (M/F/D extensions) and R4-type instructions.
+
+\section{Implementation Architecture}
+
+The pipeline's core logic was completely refactored to support multiple modes and ensure correct simulation of parallel hardware.
+
+\subsection{Double-Buffered Pipeline Registers}
+A critical simulation flaw was identified where sequential C++ execution of pipeline stages (e.g., \texttt{pipeline\_mem} running before \texttt{pipeline\_execute}) caused a data race condition. This was solved by implementing a "double-buffer" system.
+\begin{itemize}[leftmargin=*]
+    \item I duplicated all pipeline registers into a "current" set (e.g., \texttt{id\_ex\_reg}) and a "next" set (e.g., \texttt{id\_ex\_reg\_next}).
+    \item All pipeline stages now \textbf{read from} the "current" registers and \textbf{write to} the "next" registers.
+    \item At the end of \texttt{Clocktick()}, a "latch" phase copies all "next" registers to the "current" registers, perfectly simulating a single clock edge and eliminating the race condition.
+\end{itemize}
+
+\subsection{Multi-Mode Execution}
+The \texttt{Run()} and \texttt{Step()} functions now act as routers. They read the \texttt{pipeline\_mode} from the config file and call either \texttt{Run\_single()} (Mode 0) or \texttt{Run\_Pipelined()} (Modes 1-5). This cleanly separates the single-cycle and pipelined logic paths.
+
+\subsection{Modular Control Units}
+All complex hazard and control logic has been removed from pipeline stages and modularized into three independent units:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{HazardDetectionUnit (HDU):} The main brain for data hazards.
+    \item \textbf{BranchComparator:} Evaluates branch conditions in Decode for Mode 4.
+    \item \textbf{BranchPredictionUnit (BPU):} State-based prediction (2-bit counters + BTB) for Mode 5.
+\end{itemize}
+
+\section{Mode Verification \& Results}
+I have successfully implemented and verified all 6 modes using custom tests.
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Mode 0 (Single-Cycle):} Correct.
+    \item \textbf{Mode 1 (Naive Pipeline):} Incorrect results, proving hazards exist.
+    \item \textbf{Mode 2 (Stall-Only):} Correct results, many stalls.
+    \item \textbf{Mode 3 (Forwarding):} Correct results, faster, forwards correctly.
+    \item \textbf{Mode 4 (Static Prediction):} 1-cycle penalty on mispredict.
+    \item \textbf{Mode 5 (Dynamic Prediction):} Reduced stalls from 9 to 2 in loop.
+\end{itemize}
+
+\section{Challenges Addressed}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Simulation Race Condition:} Fixed using double-buffered registers.
+    \item \textbf{HDU Forwarding Logic Bug:} Fixed by checking EX/MEM/WB order.
+    \item \textbf{Incomplete Flush Loop Bug:} Fixed by dynamic valid-bit loop.
+\end{itemize}
+
+\section{Next Steps \& Future Enhancements}
+\begin{enumerate}
+    \item \textbf{Support Complex Instructions (F, D, M, R4):}
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{R4-Type:} Support \texttt{rs3} for \texttt{fmadd.s}.
+        \item \textbf{FPRs:} Add float register file and support in all stages.
+        \item \textbf{HDU Upgrade:} Handle new FPR-related dependencies.
+    \end{itemize}
+    \item \textbf{Implement Cache Hierarchy:} Add basic L1/L2 + stall signals.
+    \item \textbf{Create Trace Visualizer:} Dump \texttt{trace.json} for visualization.
+\end{enumerate}
+
+\section{Additional Advancements / Improvements}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Graphical User Interface (GUI):} Add interactive visual pipeline tracking, single-stepping, hazard highlighting, and register charting using Qt or ImGui.
+    \item \textbf{Advanced Branch Predictors:} Add GShare, tournament, hybrid predictors, global history buffers, and perceptron-based prediction.
+    \item \textbf{Extended Pseudo Instructions:} Add \texttt{li}, \texttt{sext.w}, \texttt{seqz}, \texttt{snez}, \texttt{push}, \texttt{pop}.
+    \item \textbf{Beginner-Level Cache Model:} Implement direct-mapped or 2-way set associative cache with adjustable hit/miss latency.
+    \item \textbf{Performance Counters:} Track IPC, stall cycles, memory wait cycles, mispredict rate, and execution time reports.
+    \item \textbf{Instruction Visualization Tools:} Generate cycle-by-cycle animation logs for external visualization engines.
+\end{itemize}
+
+\end{document}

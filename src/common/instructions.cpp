@@ -14,6 +14,8 @@
 #include <vector>
 #include <array>
 
+int test = 0;
+
 namespace instruction_set {
 
 std::unordered_map<std::string, Instruction> instruction_string_map = {
