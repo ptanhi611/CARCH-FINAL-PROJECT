@@ -37,6 +37,59 @@ struct VmConfig {
 
   int pipeline_mode = 0;
 
+
+    std::string input_program_path = "input.s"; 
+
+  // --- NEW METHODS FOR GUI INTEGRATION (Implemented Inline) ---
+  
+  std::string getInputProgramPath() const {
+    return input_program_path;
+  }
+
+  void load(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open config file: " + filename);
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+
+    // Helper lambda to find value by key
+    auto find_value = [&](std::string key) -> std::string {
+        size_t key_pos = content.find("\"" + key + "\"");
+        if (key_pos == std::string::npos) return "";
+        
+        // Find colon after key
+        size_t colon_pos = content.find(":", key_pos);
+        if (colon_pos == std::string::npos) return "";
+
+        // Find value start (skip whitespace/quotes)
+        size_t val_start = content.find_first_not_of(" \t\n\r\"", colon_pos + 1);
+        if (val_start == std::string::npos) return "";
+
+        // Find value end (comma, closing brace, or quote)
+        size_t val_end = content.find_first_of(",{}\"", val_start);
+        
+        return content.substr(val_start, val_end - val_start);
+    };
+
+    // 1. Parse Pipeline Mode
+    std::string mode_str = find_value("pipeline_mode");
+    if (!mode_str.empty()) {
+        try {
+            pipeline_mode = std::stoi(mode_str);
+        } catch (...) {}
+    }
+
+    // 2. Parse Input Program Path
+    std::string prog_str = find_value("input_program");
+    if (!prog_str.empty()) {
+        input_program_path = prog_str;
+    }
+  }
+
   int getPipelineMode() const {
     return pipeline_mode;
   }

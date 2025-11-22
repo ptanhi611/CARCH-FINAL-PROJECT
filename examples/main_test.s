@@ -43,6 +43,8 @@ poly_storage: .dword 0
     la x10, poly_storage
     sd x2, 0(x10)       # Store x (5) to memory
     ld x11, 0(x10)      # Load x (5) from memory into x11
+
+
     
     addi x12, x11, 1    # x12 = x11 + 1 (5 + 1 = 6)
                         # HAZARD: Needs x11 from the ld instruction

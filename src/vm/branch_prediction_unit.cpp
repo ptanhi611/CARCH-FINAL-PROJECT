@@ -2,9 +2,7 @@
 
 #include "vm/branch_prediction_unit.h"
 
-/**
- * @brief Predicts the outcome of a branch.
- */
+
 BranchPrediction BranchPredictionUnit::predict(uint64_t pc, uint64_t default_target) {
     BranchPrediction prediction;
 

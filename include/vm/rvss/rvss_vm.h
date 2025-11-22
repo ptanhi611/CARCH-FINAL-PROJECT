@@ -217,6 +217,12 @@ class RVSSVM : public VmBase {
     void pipeline_mem();
     void pipeline_write_back();
 
+    void pipeline_execute_float();
+    void pipeline_execute_double();
+    void pipeline_execute_csr();
+
+    void DumpPipelineState(const std::filesystem::path);
+
 
 
   void Clocktick();

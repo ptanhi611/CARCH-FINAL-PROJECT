@@ -37,12 +37,12 @@ RVSSVM::RVSSVM() : VmBase() {
   int mode_from_config = vm_config::config.getPipelineMode();
   pipeline_mode = static_cast<MODES>(mode_from_config);
   
-  pipeline_stalled_ = false;
-  stall_count = 0;
-  flush_fetch_ = false;
+  pipeline_stalled_ = false;    //bool for checkinf whether it has stalled or not
+  stall_count = 0;              //counter
+  flush_fetch_ = false;         
   running_ = false;
 
-  id_ex_reg = {};
+  id_ex_reg = {};               //declaration of all pipeline registers
   if_id_registers = {};
   ex_mem = {};
   mem_wb_reg = {};
@@ -53,6 +53,62 @@ RVSSVM::RVSSVM() : VmBase() {
 
 RVSSVM::~RVSSVM() = default;
 
+
+void RVSSVM::DumpPipelineState(const std::filesystem::path filename) {
+    std::ofstream file(filename);
+    if (!file.is_open()) return;
+
+    file << "{\n";
+    // Basic Stats
+    file << "  \"cycle\": " << cycle_s_ << ",\n";
+    file << "  \"pc\": " << program_counter_ << ",\n";
+    file << "  \"stall_count\": " << stall_count << ",\n";
+    file << "  \"program_counter_hex\": \"0x" << std::hex << program_counter_ << std::dec << "\",\n";
+
+    // Pipeline State Object
+    file << "  \"pipeline\": {\n";
+    
+    // FETCH Stage
+    file << "    \"fetch\": {\n";
+    file << "      \"pc\": " << if_id_registers_next.pc << ",\n";
+    file << "      \"inst_hex\": " << if_id_registers_next.inst << ",\n";
+    file << "      \"desc\": \"" << (if_id_registers_next.valid ? "BUSY" : "BUBBLE") << "\"\n";
+    file << "    },\n";
+
+    // DECODE Stage
+    file << "    \"decode\": {\n";
+    file << "      \"pc\": " << if_id_registers.pc << ",\n";
+    file << "      \"inst_hex\": " << if_id_registers.inst << ",\n";
+    file << "      \"desc\": \"" << (if_id_registers.valid ? "BUSY" : "BUBBLE") << "\"\n";
+    file << "    },\n";
+
+    // EXECUTE Stage
+    file << "    \"execute\": {\n";
+    file << "      \"inst_hex\": " << id_ex_reg.instruction_bits << ",\n";
+    file << "      \"rd\": " << (int)id_ex_reg.rd << ",\n";
+    file << "      \"forward_a\": " << (int)id_ex_reg.forward_A << ",\n";
+    file << "      \"forward_b\": " << (int)id_ex_reg.forward_B << ",\n";
+    file << "      \"desc\": \"" << (id_ex_reg.valid ? "BUSY" : "BUBBLE") << "\"\n";
+    file << "    },\n";
+
+    // MEMORY Stage
+    file << "    \"memory\": {\n";
+    file << "      \"inst_hex\": " << ex_mem.instruction_bits << ",\n";
+    file << "      \"alu_result\": " << ex_mem.alu_ans << ",\n";
+    file << "      \"desc\": \"" << (ex_mem.valid ? "BUSY" : "BUBBLE") << "\"\n";
+    file << "    },\n";
+
+    // WRITEBACK Stage
+    file << "    \"writeback\": {\n";
+    file << "      \"inst_hex\": " << mem_wb_reg.instruction_bits << ",\n";
+    file << "      \"wb_value\": " << (mem_wb_reg.signals.mem_to_reg ? mem_wb_reg.mem_data : mem_wb_reg.alu_ans) << ",\n";
+    file << "      \"desc\": \"" << (mem_wb_reg.valid ? "BUSY" : "BUBBLE") << "\"\n";
+    file << "    }\n";
+
+    file << "  }\n"; // End pipeline object
+    file << "}\n";
+    file.close();
+}
 
 void RVSSVM::Clocktick(){
   std::cout << "--- CYCLE " << std::dec << cycle_s_ + 1 << " START --- PC: 0x" << std::hex << program_counter_ << std::endl;
@@ -78,6 +134,9 @@ void RVSSVM::Clocktick(){
   mem_wb_reg = mem_wb_reg_next;
 
     cycle_s_++;
+
+  DumpRegisters(globals::registers_dump_file_path, registers_);
+  DumpPipelineState(globals::vm_state_dump_file_path);
 }
 
 
@@ -150,6 +209,10 @@ void RVSSVM::pipeline_decode() {
   if (signals.stall_fetch) {
       pipeline_stalled_ = true; // Tell Fetch to freeze next cycle
       stall_count++; // Increment stall counter
+
+      id_ex_reg_next = {}; 
+      id_ex_reg_next.valid = false;
+      return;
   }
   if (signals.flush_decode) {
       std::cout << "[DECODE] FLUSHED by HDU" << std::endl;
@@ -278,8 +341,8 @@ void RVSSVM::pipeline_execute() {
   // 1. Pass bubble if install
   if (!id_ex_reg.valid) {
     std::cout << "[EXECUTE] Bubble" << std::endl;
-    ex_mem = {};
-    ex_mem.valid = false;
+    ex_mem_next = {};
+    ex_mem_next.valid = false;
     return;
   }
 
@@ -326,7 +389,7 @@ void RVSSVM::pipeline_execute() {
   // --- (Skipping Float/CSR/Branch logic for now) ---
   // (Your old logic from Execute() for floats, etc. is NOT here)
   
-  uint64_t alu_result;
+  uint64_t alu_result = 0;
   bool overflow;
   alu::AluOp aluOperation = control_unit_.GetAluSignal(id_ex_reg.instruction_bits, id_ex_reg.signals.alu_op);
   
@@ -335,15 +398,27 @@ void RVSSVM::pipeline_execute() {
   if (opcode == get_instr_encoding(Instruction::kecall).opcode) {
     // HandleSyscall(); // This is complex, do later
     std::cout << "[EXECUTE] Syscall (stub)" << std::endl;
-    alu_result = 0; // Placeholder
+    
   } else if (instruction_set::isFInstruction(id_ex_reg.instruction_bits)) {
     // ExecuteFloat(); // This is complex, do later
-    std::cout << "[EXECUTE] F/D instruction (stub)" << std::endl;
-    alu_result = 0; // Placeholder
-  } else if (opcode == 0b1110011) {
+    std::cout << "[EXECUTE] F instruction (stub)" << std::endl;
+
+    pipeline_execute_float();
+    
+ // Placeholder
+  }
+  
+  else if(instruction_set::isDInstruction(id_ex_reg.instruction_bits)){
+    pipeline_execute_double();
+    std::cout << "[EXECUTE] D instruction (stub)" << std::endl;
+   
+  }
+  
+  else if (opcode == 0b1110011) {
     // ExecuteCsr(); // This is complex, do later
+    pipeline_execute_csr();
     std::cout << "[EXECUTE] CSR instruction (stub)" << std::endl;
-    alu_result = 0; // Placeholder
+    
   } else {
     // Standard ALU operation
     std::tie(alu_result, overflow) = alu_.execute(aluOperation, reg1_value, reg2_value);
@@ -354,7 +429,7 @@ void RVSSVM::pipeline_execute() {
             << " (for reg x" << (int)id_ex_reg.rd << ")" << std::endl;
 
 
-  // 5. Fill EX/MEM register
+ 
   ex_mem_next.alu_ans = alu_result;
   ex_mem_next.data = id_ex_reg.rs_2_data; // Pass original rs2 data for stores
   ex_mem_next.des_address = id_ex_reg.rd; 
@@ -367,8 +442,8 @@ void RVSSVM::pipeline_execute() {
 void RVSSVM::pipeline_mem() {
   if (!ex_mem.valid) {
     std::cout << "[MEMORY] Bubble" << std::endl;
-    mem_wb_reg = {};
-    mem_wb_reg.valid = false;
+    mem_wb_reg_next = {};
+    mem_wb_reg_next.valid = false;
     return;
   }
   
@@ -377,46 +452,81 @@ void RVSSVM::pipeline_mem() {
   uint64_t store_data = ex_mem.data;
   uint64_t mem_read_data = 0; 
 
+  bool is_float = instruction_set::isFInstruction(ex_mem.instruction_bits);
+  bool is_double = instruction_set::isDInstruction(ex_mem.instruction_bits);
+
   if (ex_mem.signals.mem_read_) {
     std::cout << "[MEMORY] OK. Reading from 0x" << std::hex << addr << std::dec << std::endl;
-    switch (funct3) {
-      case 0b000: mem_read_data = static_cast<int8_t>(memory_controller_.ReadByte(addr)); break;
-      case 0b001: mem_read_data = static_cast<int16_t>(memory_controller_.ReadHalfWord(addr)); break;
-      case 0b010: mem_read_data = static_cast<int32_t>(memory_controller_.ReadWord(addr)); break;
-      case 0b011: mem_read_data = memory_controller_.ReadDoubleWord(addr); break;
-      case 0b100: mem_read_data = static_cast<uint8_t>(memory_controller_.ReadByte(addr)); break;
-      case 0b101: mem_read_data = static_cast<uint16_t>(memory_controller_.ReadHalfWord(addr)); break;
-      case 0b110: mem_read_data = static_cast<uint32_t>(memory_controller_.ReadWord(addr)); break;
-      default: mem_read_data = memory_controller_.ReadDoubleWord(addr);
+
+    if(is_float){
+      mem_read_data = memory_controller_.ReadWord(addr);
     }
-  } else if (ex_mem.signals.mem_write_) {
+    else if(is_double){
+      mem_read_data = memory_controller_.ReadDoubleWord(addr);
+    }
+    else{
+      switch (funct3) {
+        case 0b000: mem_read_data = static_cast<int8_t>(memory_controller_.ReadByte(addr)); break;
+        case 0b001: mem_read_data = static_cast<int16_t>(memory_controller_.ReadHalfWord(addr)); break;
+        case 0b010: mem_read_data = static_cast<int32_t>(memory_controller_.ReadWord(addr)); break;
+        case 0b011: mem_read_data = memory_controller_.ReadDoubleWord(addr); break;
+        case 0b100: mem_read_data = static_cast<uint8_t>(memory_controller_.ReadByte(addr)); break;
+        case 0b101: mem_read_data = static_cast<uint16_t>(memory_controller_.ReadHalfWord(addr)); break;
+        case 0b110: mem_read_data = static_cast<uint32_t>(memory_controller_.ReadWord(addr)); break;
+        default: mem_read_data = memory_controller_.ReadDoubleWord(addr);
+      }
+    
+    }
+
+    
+  }
+
+  else if (ex_mem.signals.mem_write_) {
     std::cout << "[MEMORY] OK. Writing 0x" << std::hex << store_data << " to 0x" << addr << std::dec << std::endl;
-    switch (funct3) {
-      case 0b000: memory_controller_.WriteByte(addr, store_data & 0xFF); break;
-      case 0b001: memory_controller_.WriteHalfWord(addr, store_data & 0xFFFF); break;
-      case 0b010: memory_controller_.WriteWord(addr, store_data & 0xFFFFFFFF); break;
-      case 0b011: memory_controller_.WriteDoubleWord(addr, store_data); break;
+    
+    if (is_float) { // FSW
+        memory_controller_.WriteWord(addr, store_data & 0xFFFFFFFF);
+    } else if (is_double) { // FSD
+        memory_controller_.WriteDoubleWord(addr, store_data);
+    } else {
+        // Integer Stores
+        switch (funct3) {
+            case 0b000: memory_controller_.WriteByte(addr, store_data & 0xFF); break;
+            case 0b001: memory_controller_.WriteHalfWord(addr, store_data & 0xFFFF); break;
+            case 0b010: memory_controller_.WriteWord(addr, store_data & 0xFFFFFFFF); break;
+            case 0b011: memory_controller_.WriteDoubleWord(addr, store_data); break;
+        }
     }
-  } else {
+  }
+
+
+  else {
     std::cout << "[MEMORY] OK. (No-op)" << std::endl;
   }
+
+
+  
+  
+ 
   
   mem_wb_reg_next.alu_ans = ex_mem.alu_ans;
   mem_wb_reg_next.mem_data = mem_read_data; 
   mem_wb_reg_next.des_address = ex_mem.des_address;
   mem_wb_reg_next.signals = ex_mem.signals;
+  mem_wb_reg_next.instruction_bits = ex_mem.instruction_bits;
   mem_wb_reg_next.valid = true;
 }
 
 void RVSSVM::pipeline_write_back() {
   if (!mem_wb_reg.valid) {
     std::cout << "[WRITE_BACK] Bubble" << std::endl;
-    return; // Bubble is done
+    return; 
   }
 
   if (mem_wb_reg.signals.reg_write_) {
     uint64_t data_to_write;
     uint8_t rd = mem_wb_reg.des_address;
+    uint32_t inst = mem_wb_reg.instruction_bits;
 
     if (mem_wb_reg.signals.mem_to_reg) {
       data_to_write = mem_wb_reg.mem_data;
@@ -424,9 +534,46 @@ void RVSSVM::pipeline_write_back() {
       data_to_write = mem_wb_reg.alu_ans;
     }
     
-    if (rd != 0) {
-      std::cout << "[WRITE_BACK] OK. Writing 0x" << std::hex << data_to_write << " to x" << std::dec << (int)rd << std::endl;
-      registers_.WriteGpr(rd, data_to_write);
+    // --- TYPE DETECTION ---
+    bool is_float = instruction_set::isFInstruction(inst);
+    bool is_double = instruction_set::isDInstruction(inst);
+
+    if (rd != 0 || is_float || is_double) { // FP regs can write to f0, only x0 is hardwired zero
+      
+        // Check if destination is GPR or FPR
+        // Most F/D instructions write to FPR, but some (Compare, Class, Move-to-X) write to GPR.
+        bool write_to_gpr = false;
+
+        if (is_float) {
+            uint8_t funct7 = (inst >> 25) & 0x7F;
+            // f(eq|lt|le).s, fcvt.w.s, fmv.x.w, fclass.s write to Integer Reg
+            if (funct7 == 0b1010000 || funct7 == 0b1100000 || funct7 == 0b1110000) {
+                write_to_gpr = true;
+            }
+        }
+        if (is_double) {
+            uint8_t funct7 = (inst >> 25) & 0x7F;
+            // f(eq|lt|le).d, fcvt.w.d, fmv.x.d, fclass.d write to Integer Reg
+            if (funct7 == 0b1010001 || funct7 == 0b1100001 || funct7 == 0b1110001) {
+                write_to_gpr = true;
+            }
+        }
+        
+        // Default Integer instructions always write to GPR
+        if (!is_float && !is_double) write_to_gpr = true;
+
+
+        if (write_to_gpr) {
+            if (rd != 0) {
+                std::cout << "[WRITE_BACK] Writing 0x" << std::hex << data_to_write << " to x" << std::dec << (int)rd << std::endl;
+                registers_.WriteGpr(rd, data_to_write);
+            }
+        } else {
+            // Write to FPR
+            std::cout << "[WRITE_BACK] Writing 0x" << std::hex << data_to_write << " to f" << std::dec << (int)rd << std::endl;
+            registers_.WriteFpr(rd, data_to_write);
+        }
+
     } else {
       std::cout << "[WRITE_BACK] OK. (No-op, dest is x0)" << std::endl;
     }
@@ -437,7 +584,7 @@ void RVSSVM::pipeline_write_back() {
   }
 }
 
-// --- Your Original Single-Cycle Functions ---
+// our Original Single-Cycle Functions as it is in repo
 // (These are all UNCHANGED)
 
 void RVSSVM::Fetch() {
@@ -582,6 +729,55 @@ void RVSSVM::ExecuteFloat() {
   registers_.WriteCsr(0x003, fcsr_status);
 }
 
+void RVSSVM::pipeline_execute_float() {
+  
+  uint32_t inst = id_ex_reg.instruction_bits;
+  uint8_t opcode = inst & 0x7F;
+  uint8_t funct7 = (inst >> 25) & 0x7F;
+  uint8_t funct3 = (inst >> 12) & 0x7;
+  uint8_t rs1 = (inst >> 15) & 0x1F;
+  uint8_t rs2 = (inst >> 20) & 0x1F;
+  uint8_t rs3 = (inst >> 27) & 0x1F;
+  uint8_t rm = funct3;
+
+  uint64_t val1 = 0, val2 = 0, val3 = 0;
+
+  if (funct7 == 0b1101000 || funct7 == 0b1111000 || opcode == 0b0000111 || opcode == 0b0100111) {
+      val1 = id_ex_reg.rs1_data; 
+  }
+  else {
+      val1 = registers_.ReadFpr(rs1);
+  }
+
+  val2 = registers_.ReadFpr(rs2);
+  val3 = registers_.ReadFpr(rs3);
+
+
+  uint64_t result;
+  uint8_t fcsr_status = 0;
+  alu::AluOp op = control_unit_.GetAluSignal(inst, id_ex_reg.signals.alu_op);
+  
+  std::tie(result, fcsr_status) = alu::Alu::fpexecute(op, val1, val2, val3, rm);
+
+  // Write FCSR (Update Status Flags immediately)
+  // Ideally this happens in WB, but simulating it here is fine for now.
+  if (fcsr_status != 0) {
+      uint64_t current_fcsr = registers_.ReadCsr(0x003);
+      registers_.WriteCsr(0x003, current_fcsr | fcsr_status);
+  }
+
+  // --- SETUP NEXT STAGE ---
+  ex_mem_next.alu_ans = result;
+  
+  // For Stores (FSW), the data to store is in rs2 (FPR). 
+  // pipeline_mem uses `ex_mem.data`. We must override the GPR data from Decode with the FPR data.
+  if (id_ex_reg.signals.mem_write_) {
+      ex_mem_next.data = registers_.ReadFpr(rs2); 
+  }
+
+
+}
+
 void RVSSVM::ExecuteDouble() {
   uint8_t opcode = current_instruction_ & 0b1111111;
   uint8_t funct3 = (current_instruction_ >> 12) & 0b111;
@@ -611,6 +807,52 @@ void RVSSVM::ExecuteDouble() {
   std::tie(execution_result_, fcsr_status) = alu::Alu::dfpexecute(aluOperation, reg1_value, reg2_value, reg3_value, rm);
 }
 
+void RVSSVM::pipeline_execute_double() {
+  uint32_t inst = id_ex_reg.instruction_bits;
+  uint8_t opcode = inst & 0x7F;
+  uint8_t funct7 = (inst >> 25) & 0x7F;
+  uint8_t funct3 = (inst >> 12) & 0x7;
+  uint8_t rs1 = (inst >> 15) & 0x1F;
+  uint8_t rs2 = (inst >> 20) & 0x1F;
+  uint8_t rs3 = (inst >> 27) & 0x1F;
+  uint8_t rm = funct3;
+
+  if (rm == 0b111) {
+    rm = registers_.ReadCsr(0x002);
+  }
+
+  uint64_t val1 = 0, val2 = 0, val3 = 0;
+
+  
+  if (funct7 == 0b1101001 || funct7 == 0b1111001 || opcode == 0b0000111 || opcode == 0b0100111) {
+      
+      val1 = id_ex_reg.rs1_data;
+  } else {
+      val1 = registers_.ReadFpr(rs1);
+  }
+
+  val2 = registers_.ReadFpr(rs2);
+  val3 = registers_.ReadFpr(rs3);
+
+  uint64_t result;
+  uint8_t fcsr_status = 0;
+  alu::AluOp op = control_unit_.GetAluSignal(inst, id_ex_reg.signals.alu_op);
+
+  std::tie(result, fcsr_status) = alu::Alu::dfpexecute(op, val1, val2, val3, rm);
+
+  if (fcsr_status != 0) {
+      uint64_t current_fcsr = registers_.ReadCsr(0x003);
+      registers_.WriteCsr(0x003, current_fcsr | fcsr_status);
+  }
+
+  ex_mem_next.alu_ans = result;
+
+  
+  if (id_ex_reg.signals.mem_write_) {
+      ex_mem_next.data = registers_.ReadFpr(rs2);
+  }
+}
+
 void RVSSVM::ExecuteCsr() {
   uint8_t rs1 = (current_instruction_ >> 15) & 0b11111;
   uint16_t csr = (current_instruction_ >> 20) & 0xFFF;
@@ -620,6 +862,61 @@ void RVSSVM::ExecuteCsr() {
   csr_old_value_ = csr_val;
   csr_write_val_ = registers_.ReadGpr(rs1);
   csr_uimm_ = rs1;
+}
+
+
+void RVSSVM::pipeline_execute_csr() {
+  uint32_t inst = id_ex_reg.instruction_bits;
+  uint8_t rs1 = (inst >> 15) & 0x1F;
+  uint16_t csr_addr = (inst >> 20) & 0xFFF;
+  uint8_t funct3 = (inst >> 12) & 0x7;
+
+  // Read current CSR value
+  uint64_t old_val = registers_.ReadCsr(csr_addr);
+  uint64_t write_val = 0;
+  uint64_t uimm = rs1; // For immediate CSR ops
+  uint64_t rs1_val = id_ex_reg.rs1_data;
+
+  // Calculate new value based on funct3
+  // CSRRW (1), CSRRS (2), CSRRC (3), CSRRWI (5), CSRRSI (6), CSRRCI (7)
+  switch (funct3) {
+      case 0b001: // CSRRW
+          write_val = rs1_val;
+          break;
+      case 0b010: // CSRRS (Read and Set Bit)
+          write_val = old_val | rs1_val;
+          break;
+      case 0b011: // CSRRC (Read and Clear Bit)
+          write_val = old_val & ~rs1_val;
+          break;
+      case 0b101: // CSRRWI
+          write_val = uimm;
+          break;
+      case 0b110: // CSRRSI
+          write_val = old_val | uimm;
+          break;
+      case 0b111: // CSRRCI
+          write_val = old_val & ~uimm;
+          break;
+      default:
+          write_val = old_val; // Should not happen for valid CSR ops
+          break;
+  }
+
+  // Perform the Write (Effectively commit change now for simplicity)
+  // In a precise pipeline, this might happen in WB, but CSR effects are often immediate in sims.
+  // We check if we should write (rs1 != 0 for Set/Clear)
+  bool perform_write = true;
+  if ((funct3 == 0b010 || funct3 == 0b011 || funct3 == 0b110 || funct3 == 0b111) && rs1 == 0) {
+      perform_write = false; 
+  }
+
+  if (perform_write) {
+      registers_.WriteCsr(csr_addr, write_val);
+  }
+
+  // The result of the instruction is the OLD value of the CSR (written to rd)
+  ex_mem_next.alu_ans = old_val; 
 }
 
 void RVSSVM::HandleSyscall() {
@@ -1448,6 +1745,7 @@ void RVSSVM::Run_Pipelined() {
     if (instructions_retired_ > vm_config::config.getInstructionExecutionLimit())
       break;
     Clocktick(); // Runs one full pipeline cycle
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
   // --- Pipeline flush loop ---
@@ -1455,6 +1753,7 @@ void RVSSVM::Run_Pipelined() {
   while (running_ && !stop_requested_ && flush_cycles >= 0) {
       Clocktick();
       flush_cycles--;
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
   running_ = false;
@@ -1467,7 +1766,7 @@ void RVSSVM::Run_Pipelined() {
   std::cout << "--- Pipeline Run Stats ---" << std::endl;
   std::cout << "Total Cycles: " << std::dec << cycle_s_ << std::endl;
   std::cout << "Total Stalls: " << std::dec << stall_count << std::endl;
-  // --- END ADD ---
+  
 
   DumpRegisters(globals::registers_dump_file_path, registers_);
   DumpState(globals::vm_state_dump_file_path);

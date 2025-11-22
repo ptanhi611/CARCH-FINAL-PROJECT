@@ -88,6 +88,9 @@ struct EX_MEM_registers{
     uint8_t funct3 = 0;
 
 
+    uint32_t instruction_bits;
+
+
 
 };
 
@@ -105,6 +108,7 @@ struct MEM_WB_registers{
 
     Control_signals signals;
 
+     uint32_t instruction_bits;
 
 
 };
