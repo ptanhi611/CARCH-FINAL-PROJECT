@@ -1,24 +1,34 @@
-# RISC-V simulator
+# 5-Stage Pipelined RISC-V Simulator
 
-## Building the Project
+This project implements a 5-Stage Pipelined RISC-V Processor Simulator in C++, supporting integer and floating-point instructions with hazard detection, forwarding, and branching. The simulator can be run in both CLI and GUI modes to visualize pipeline behavior and register states.
 
-The code base is written in C++17, to build the project use cmake. (You might want to use 
-ninja for faster builds.)
+---
 
-## Usage
+## How to Build & Run
 
-To run the simulator, use the following command:
+### Build
+    mkdir build
+    cd build
+    cmake ..
+    make
 
-```
-./vm --start-vm
-```
+### CLI Mode
+Run the simulator from the build directory:
 
-See [Commands](COMMANDS.md) for a list of commands.
+    ./vm --start-vm
 
-## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
+Within the interactive shell, you can:
 
+    load ../examples/stress_test.s
+    modify_config pipelining mode 3
+    run
 
-## References
-- [RISC-V Specifications](https://riscv.org/specifications/)
-- [Five EmbedDev ISA manual](https://five-embeddev.com/riscv-isa-manual/)
+### GUI Mode
+Run the Python GUI:
+
+    python3 python_script.py
+
+Steps:
+1. Load an assembly or machine code file.
+2. Step through the simulation cycle-by-cycle or run to completion.
+3. Observe the pipeline stages and register file updates live.
