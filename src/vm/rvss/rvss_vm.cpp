@@ -191,37 +191,37 @@ void RVSSVM::Pipeline_fetch() {
   program_counter_ = predicted_pc;
 }
 
-
 void RVSSVM::pipeline_decode() {
   // 1. Get the current mode
   int mode = static_cast<int>(pipeline_mode);
   
-  // 2. Ask the HDU (the member variable) what to do
+  // 2. Ask the HDU
   PipelineControlSignals signals = HDU.compute_signals(
       mode,
-      if_id_registers.inst, // Pass the new instruction
-      id_ex_reg,      // Pass the state of the EX stage
-      ex_mem,     // Pass the state of the MEM stage
-      mem_wb_reg     // Pass the state of the WB stage
+      if_id_registers.inst, 
+      id_ex_reg,      
+      ex_mem,     
+      mem_wb_reg     
   );
 
   // 3. React to HDU signals
   if (signals.stall_fetch) {
-      pipeline_stalled_ = true; // Tell Fetch to freeze next cycle
-      stall_count++; // Increment stall counter
-
+      pipeline_stalled_ = true; 
+      stall_count++; 
+      
       id_ex_reg_next = {}; 
       id_ex_reg_next.valid = false;
+      // You can add a log here if you want, but original didn't have a specific stall log inside decode
       return;
   }
   if (signals.flush_decode) {
       std::cout << "[DECODE] FLUSHED by HDU" << std::endl;
-      id_ex_reg_next = {}; // Inject NOP
+      id_ex_reg_next = {}; 
       id_ex_reg_next.valid = false;
       return;
   }
 
-  // 4. If incoming instruction is a bubble, pass it
+  // 4. Bubble Check
   if (!if_id_registers.valid) {
       std::cout << "[DECODE] Bubble passing through" << std::endl;
       id_ex_reg_next = {};
@@ -229,7 +229,7 @@ void RVSSVM::pipeline_decode() {
       return;
   }
 
-  // 5. No stall: Proceed with normal decode
+  // 5. Decode
   const uint32_t instruction = if_id_registers.inst;
   std::cout << "[DECODE] OK. Decoding 0x" << std::hex << instruction << std::dec << std::endl;
   
@@ -243,14 +243,28 @@ void RVSSVM::pipeline_decode() {
   uint8_t funct7 = (instruction >> 25) & 0b1111111;
   int32_t imm = ImmGenerator(instruction);
 
-  uint64_t reg1_value = registers_.ReadGpr(rs1);
-  uint64_t reg2_value = registers_.ReadGpr(rs2);
+  // --- TYPE DETECTION (Fix for Float/Double Reg Reading) ---
+  bool is_float = instruction_set::isFInstruction(instruction);
+  bool is_double = instruction_set::isDInstruction(instruction);
+  bool rs1_is_fp = false;
+  bool rs2_is_fp = false;
 
+  if (is_float || is_double) {
+      // FSW/FSD and FMV.W.X use Integer RS1
+      bool is_store = (opcode == 0b0100111); 
+      bool is_fmv_x = (opcode == 0b1010011 && funct7 == 0b1110000); 
 
+      if (is_store || is_fmv_x) rs1_is_fp = false; 
+      else rs1_is_fp = true;  
+      
+      rs2_is_fp = true; // Float ops usually use FPR for rs2
+  }
 
+  // --- READ REGISTERS ---
+  uint64_t reg1_value = rs1_is_fp ? registers_.ReadFpr(rs1) : registers_.ReadGpr(rs1);
+  uint64_t reg2_value = rs2_is_fp ? registers_.ReadFpr(rs2) : registers_.ReadGpr(rs2);
 
-  // --- 6. Handle ALL Control Flow (JAL, JALR, Branches) ---
-  
+  // --- CONTROL FLOW ---
   uint64_t branch_target = 0;
   bool is_branch_taken = false;
   bool is_control_flow = true; 
@@ -260,56 +274,52 @@ void RVSSVM::pipeline_decode() {
       branch_target = if_id_registers.pc + imm;
   } else if (opcode == 0b1100111) { // JALR
       is_branch_taken = true;
-      branch_target = reg1_value + imm; // Uses forwarded rs1
-  } else if (control_unit_.GetBranch()) { // BEQ, BNE, etc.
+      branch_target = reg1_value + imm; 
+  } else if (control_unit_.GetBranch()) { // Branches
       is_branch_taken = branch_alu.result(funct3, reg1_value, reg2_value);
       branch_target = if_id_registers.pc + imm;
   } else {
-      is_control_flow = false; // Not a branch
+      is_control_flow = false; 
   }
 
-
-
     if (is_control_flow) {
-      bool prediction_correct = true; // Assume correct until proven otherwise
+      bool prediction_correct = true; 
       
       if (pipeline_mode == MODES::PIPELINE_H_F_STATIC_BRANCH) {
-          // Mode 4: Static "Predict Not Taken"
           prediction_correct = (is_branch_taken == false);
           std::cout << "[DECODE] (Mode 4) Branch. Taken=" << is_branch_taken << ". Predict=NOT_TAKEN. Correct=" << prediction_correct << std::endl;
-      
       } else if (pipeline_mode >= MODES::PIPELINE_H_F_DYNAMIC_BRANCH) {
-          // Mode 5: Dynamic Prediction
           prediction_correct = (is_branch_taken == if_id_registers.predicted_as_taken);
           std::cout << "[DECODE] (Mode 5) Branch. Taken=" << is_branch_taken << ". Predict=" << if_id_registers.predicted_as_taken << ". Correct=" << prediction_correct << std::endl;
-          
-          // Train the BPU
           bpu_.update(if_id_registers.pc, is_branch_taken, branch_target);
       }
       
+      if ((opcode == 0b1101111 || opcode == 0b1100111) && !if_id_registers.predicted_as_taken) {
+          prediction_correct = false;
+      }
+
       if (!prediction_correct) {
           std::cout << "[DECODE] MISPREDICT! Flushing." << std::endl;
-          
-          // Set PC to the *correct* path
           program_counter_ = is_branch_taken ? branch_target : if_id_registers.pc_plus_4;
-          flush_fetch_ = true; // Tell Fetch to flush
+          flush_fetch_ = true; 
           stall_count++;
           
-          // Special case for JAL/JALR: still need to write back PC+4
           if (opcode == 0b1101111 || opcode == 0b1100111) {
-              id_ex_reg = {}; // Flush, but set up the write-back
-              id_ex_reg.valid = true;
-              id_ex_reg.signals.reg_write_ = true;
-              id_ex_reg.alu_ans = if_id_registers.pc_plus_4; // This is the value to write
-              id_ex_reg.rd = rd;
+              id_ex_reg_next = {}; 
+              id_ex_reg_next.valid = true;
+              id_ex_reg_next.signals.reg_write_ = true;
+              id_ex_reg_next.alu_ans = if_id_registers.pc_plus_4; 
+              id_ex_reg_next.rd = rd;
+              id_ex_reg_next.instruction_bits = instruction;
           } else {
-              id_ex_reg = {}; // Just a flush
-              id_ex_reg.valid = false;
+              id_ex_reg_next = {}; 
+              id_ex_reg_next.valid = false;
           }
-          return; // Stop decoding this (now flushed) instruction
+          return; 
       }
   }
-  // 6. Fill the ID/EX register
+
+  // 6. Fill ID/EX
   id_ex_reg_next.pc_plus_4 = if_id_registers.pc_plus_4;
   id_ex_reg_next.rs1_data = reg1_value;
   id_ex_reg_next.rs_2_data = reg2_value;
@@ -320,25 +330,17 @@ void RVSSVM::pipeline_decode() {
   id_ex_reg_next.funct3 = funct3; 
   id_ex_reg_next.funct7 = funct7; 
   id_ex_reg_next.instruction_bits = instruction;
-
-  // Pass control signals from Control Unit
   id_ex_reg_next.signals.alu_op = control_unit_.GetAluOp();
   id_ex_reg_next.signals.alu_src_ = control_unit_.GetAluSrc();
   id_ex_reg_next.signals.mem_read_ = control_unit_.GetMemRead();
   id_ex_reg_next.signals.mem_write_ = control_unit_.GetMemWrite();
   id_ex_reg_next.signals.reg_write_ = control_unit_.GetRegWrite();
   id_ex_reg_next.signals.mem_to_reg = control_unit_.GetMemToReg();
-  // id_ex_reg_.signals.branch = control_unit_.GetBranch(); 
-
-  // Pass forwarding signals from HDU
   id_ex_reg_next.forward_A = signals.forward_A;
   id_ex_reg_next.forward_B = signals.forward_B;
   id_ex_reg_next.valid = true;
 }
-
-
 void RVSSVM::pipeline_execute() {
-  // 1. Pass bubble if install
   if (!id_ex_reg.valid) {
     std::cout << "[EXECUTE] Bubble" << std::endl;
     ex_mem_next = {};
@@ -346,11 +348,12 @@ void RVSSVM::pipeline_execute() {
     return;
   }
 
+  uint32_t inst = id_ex_reg.instruction_bits;
+  uint8_t opcode = inst & 0b1111111;
 
   uint64_t reg1_value = id_ex_reg.rs1_data;
   uint64_t reg2_value = id_ex_reg.rs_2_data;
-  // 2. Select data for rs1 based on Forwarding (MUX A)
- 
+
   switch (id_ex_reg.forward_A) {
       case ForwardSource::FROM_DECODE:
           reg1_value = id_ex_reg.rs1_data;
@@ -365,8 +368,6 @@ void RVSSVM::pipeline_execute() {
           break;
   }
   
-  // 3. Select data for rs2 based on Forwarding (MUX B)
- 
   switch (id_ex_reg.forward_B) {
       case ForwardSource::FROM_DECODE:
           reg2_value = id_ex_reg.rs_2_data;
@@ -380,64 +381,58 @@ void RVSSVM::pipeline_execute() {
           std::cout << "[EXECUTE] Forwarding MEM->EX for rs2" << std::endl;
           break;
   }
-  
-  // 4. Handle ALU source MUX (for immediates)
-  if (id_ex_reg.signals.alu_src_) {
-    reg2_value = static_cast<uint64_t>(id_ex_reg.imm);
+
+  bool is_float = instruction_set::isFInstruction(inst);
+  bool is_double = instruction_set::isDInstruction(inst);
+  bool is_f_load_store = (opcode == 0b0000111 || opcode == 0b0100111); 
+
+  if ((is_float || is_double) && !is_f_load_store) {
+      if (is_float) {
+          std::cout << "[EXECUTE] F instruction (stub)" << std::endl;
+          pipeline_execute_float();
+      } else {
+          std::cout << "[EXECUTE] D instruction (stub)" << std::endl;
+          pipeline_execute_double();
+      }
+      return;
   }
-  
-  // --- (Skipping Float/CSR/Branch logic for now) ---
-  // (Your old logic from Execute() for floats, etc. is NOT here)
-  
+
+  if (opcode == 0b1110011) { 
+      if ((inst >> 20) == 0) HandleSyscall();
+      else {
+          pipeline_execute_csr();
+          std::cout << "[EXECUTE] CSR instruction (stub)" << std::endl;
+      }
+      return;
+  }
+
+  uint64_t alu_op2 = reg2_value;
+
+  if (id_ex_reg.signals.alu_src_) {
+    alu_op2 = static_cast<uint64_t>(id_ex_reg.imm);
+  }
+
   uint64_t alu_result = 0;
   bool overflow;
-  alu::AluOp aluOperation = control_unit_.GetAluSignal(id_ex_reg.instruction_bits, id_ex_reg.signals.alu_op);
   
-
-   uint8_t opcode = id_ex_reg.instruction_bits & 0b1111111;
-  if (opcode == get_instr_encoding(Instruction::kecall).opcode) {
-    // HandleSyscall(); // This is complex, do later
-    std::cout << "[EXECUTE] Syscall (stub)" << std::endl;
-    
-  } else if (instruction_set::isFInstruction(id_ex_reg.instruction_bits)) {
-    // ExecuteFloat(); // This is complex, do later
-    std::cout << "[EXECUTE] F instruction (stub)" << std::endl;
-
-    pipeline_execute_float();
-    
- // Placeholder
-  }
-  
-  else if(instruction_set::isDInstruction(id_ex_reg.instruction_bits)){
-    pipeline_execute_double();
-    std::cout << "[EXECUTE] D instruction (stub)" << std::endl;
-   
-  }
-  
-  else if (opcode == 0b1110011) {
-    // ExecuteCsr(); // This is complex, do later
-    pipeline_execute_csr();
-    std::cout << "[EXECUTE] CSR instruction (stub)" << std::endl;
-    
+  if (opcode == 0b1101111 || opcode == 0b1100111) {
+      alu_result = id_ex_reg.pc_plus_4;
   } else {
-    // Standard ALU operation
-    std::tie(alu_result, overflow) = alu_.execute(aluOperation, reg1_value, reg2_value);
+      alu::AluOp aluOperation = control_unit_.GetAluSignal(inst, id_ex_reg.signals.alu_op);
+      std::tie(alu_result, overflow) = alu_.execute(aluOperation, reg1_value, alu_op2);
   }
-  // --- End of refactored logic ---
 
-  std::cout << "[EXECUTE] OK. Result: 0x" << std::hex << alu_result << std::dec
+  std::cout << "[EXECUTE] OK. Result: 0x" << std::hex << alu_result << std::dec 
             << " (for reg x" << (int)id_ex_reg.rd << ")" << std::endl;
 
-
- 
   ex_mem_next.alu_ans = alu_result;
-  ex_mem_next.data = id_ex_reg.rs_2_data; // Pass original rs2 data for stores
-  ex_mem_next.des_address = id_ex_reg.rd; 
-  ex_mem_next.funct3 = id_ex_reg.funct3; 
-  ex_mem_next.signals = id_ex_reg.signals; 
+  ex_mem_next.data = reg2_value;
+  ex_mem_next.des_address = id_ex_reg.rd;
+  ex_mem_next.funct3 = id_ex_reg.funct3;
+  ex_mem_next.signals = id_ex_reg.signals;
+  ex_mem_next.instruction_bits = inst;
   ex_mem_next.valid = true;
 }
-
 
 void RVSSVM::pipeline_mem() {
   if (!ex_mem.valid) {
@@ -730,28 +725,47 @@ void RVSSVM::ExecuteFloat() {
 }
 
 void RVSSVM::pipeline_execute_float() {
-  
   uint32_t inst = id_ex_reg.instruction_bits;
-  uint8_t opcode = inst & 0x7F;
-  uint8_t funct7 = (inst >> 25) & 0x7F;
   uint8_t funct3 = (inst >> 12) & 0x7;
-  uint8_t rs1 = (inst >> 15) & 0x1F;
-  uint8_t rs2 = (inst >> 20) & 0x1F;
-  uint8_t rs3 = (inst >> 27) & 0x1F;
   uint8_t rm = funct3;
 
-  uint64_t val1 = 0, val2 = 0, val3 = 0;
+  uint64_t val1 = id_ex_reg.rs1_data;
+  uint64_t val2 = id_ex_reg.rs_2_data;
 
-  if (funct7 == 0b1101000 || funct7 == 0b1111000 || opcode == 0b0000111 || opcode == 0b0100111) {
-      val1 = id_ex_reg.rs1_data; 
+  // --- Forwarding A (Float) ---
+  switch (id_ex_reg.forward_A) {
+      case ForwardSource::FROM_DECODE:
+          val1 = id_ex_reg.rs1_data;
+          break;
+      case ForwardSource::FROM_EXECUTE:
+          val1 = ex_mem.alu_ans;
+          std::cout << "[EXECUTE-F] Forwarding EX->EX for rs1" << std::endl;
+          break;
+      case ForwardSource::FROM_MEMORY:
+          val1 = mem_wb_reg.signals.mem_to_reg ? mem_wb_reg.mem_data : mem_wb_reg.alu_ans;
+          std::cout << "[EXECUTE-F] Forwarding MEM->EX for rs1" << std::endl;
+          break;
   }
-  else {
-      val1 = registers_.ReadFpr(rs1);
+
+  // --- Forwarding B (Float) ---
+  switch (id_ex_reg.forward_B) {
+      case ForwardSource::FROM_DECODE:
+          val2 = id_ex_reg.rs_2_data;
+          break;
+      case ForwardSource::FROM_EXECUTE:
+          val2 = ex_mem.alu_ans;
+          std::cout << "[EXECUTE-F] Forwarding EX->EX for rs2" << std::endl;
+          break;
+      case ForwardSource::FROM_MEMORY:
+          val2 = mem_wb_reg.signals.mem_to_reg ? mem_wb_reg.mem_data : mem_wb_reg.alu_ans;
+          std::cout << "[EXECUTE-F] Forwarding MEM->EX for rs2" << std::endl;
+          break;
   }
 
-  val2 = registers_.ReadFpr(rs2);
-  val3 = registers_.ReadFpr(rs3);
+  uint8_t rs3 = (inst >> 27) & 0x1F;
+  uint64_t val3 = registers_.ReadFpr(rs3); 
 
+  if (rm == 0b111) rm = registers_.ReadCsr(0x002);
 
   uint64_t result;
   uint8_t fcsr_status = 0;
@@ -759,23 +773,18 @@ void RVSSVM::pipeline_execute_float() {
   
   std::tie(result, fcsr_status) = alu::Alu::fpexecute(op, val1, val2, val3, rm);
 
-  // Write FCSR (Update Status Flags immediately)
-  // Ideally this happens in WB, but simulating it here is fine for now.
   if (fcsr_status != 0) {
       uint64_t current_fcsr = registers_.ReadCsr(0x003);
       registers_.WriteCsr(0x003, current_fcsr | fcsr_status);
   }
 
-  // --- SETUP NEXT STAGE ---
   ex_mem_next.alu_ans = result;
-  
-  // For Stores (FSW), the data to store is in rs2 (FPR). 
-  // pipeline_mem uses `ex_mem.data`. We must override the GPR data from Decode with the FPR data.
-  if (id_ex_reg.signals.mem_write_) {
-      ex_mem_next.data = registers_.ReadFpr(rs2); 
-  }
-
-
+  ex_mem_next.data = val2; 
+  ex_mem_next.des_address = id_ex_reg.rd;
+  ex_mem_next.funct3 = id_ex_reg.funct3;
+  ex_mem_next.signals = id_ex_reg.signals;
+  ex_mem_next.instruction_bits = id_ex_reg.instruction_bits;
+  ex_mem_next.valid = true;
 }
 
 void RVSSVM::ExecuteDouble() {
@@ -809,30 +818,41 @@ void RVSSVM::ExecuteDouble() {
 
 void RVSSVM::pipeline_execute_double() {
   uint32_t inst = id_ex_reg.instruction_bits;
-  uint8_t opcode = inst & 0x7F;
-  uint8_t funct7 = (inst >> 25) & 0x7F;
-  uint8_t funct3 = (inst >> 12) & 0x7;
-  uint8_t rs1 = (inst >> 15) & 0x1F;
-  uint8_t rs2 = (inst >> 20) & 0x1F;
+  uint8_t rm = (inst >> 12) & 0x7;
+
+  uint64_t val1 = id_ex_reg.rs1_data;
+  uint64_t val2 = id_ex_reg.rs_2_data;
+
+  // --- Forwarding A ---
+  switch (id_ex_reg.forward_A) {
+      case ForwardSource::FROM_DECODE:  val1 = id_ex_reg.rs1_data; break;
+      case ForwardSource::FROM_EXECUTE: 
+          val1 = ex_mem.alu_ans;     
+          std::cout << "[EXECUTE-D] Forwarding EX->EX for rs1" << std::endl;
+          break;
+      case ForwardSource::FROM_MEMORY:  
+          val1 = mem_wb_reg.signals.mem_to_reg ? mem_wb_reg.mem_data : mem_wb_reg.alu_ans;
+          std::cout << "[EXECUTE-D] Forwarding MEM->EX for rs1" << std::endl;
+          break;
+  }
+
+  // --- Forwarding B ---
+  switch (id_ex_reg.forward_B) {
+      case ForwardSource::FROM_DECODE:  val2 = id_ex_reg.rs_2_data; break;
+      case ForwardSource::FROM_EXECUTE: 
+          val2 = ex_mem.alu_ans;     
+          std::cout << "[EXECUTE-D] Forwarding EX->EX for rs2" << std::endl;
+          break;
+      case ForwardSource::FROM_MEMORY:  
+          val2 = mem_wb_reg.signals.mem_to_reg ? mem_wb_reg.mem_data : mem_wb_reg.alu_ans;
+          std::cout << "[EXECUTE-D] Forwarding MEM->EX for rs2" << std::endl;
+          break;
+  }
+
   uint8_t rs3 = (inst >> 27) & 0x1F;
-  uint8_t rm = funct3;
+  uint64_t val3 = registers_.ReadFpr(rs3); 
 
-  if (rm == 0b111) {
-    rm = registers_.ReadCsr(0x002);
-  }
-
-  uint64_t val1 = 0, val2 = 0, val3 = 0;
-
-  
-  if (funct7 == 0b1101001 || funct7 == 0b1111001 || opcode == 0b0000111 || opcode == 0b0100111) {
-      
-      val1 = id_ex_reg.rs1_data;
-  } else {
-      val1 = registers_.ReadFpr(rs1);
-  }
-
-  val2 = registers_.ReadFpr(rs2);
-  val3 = registers_.ReadFpr(rs3);
+  if (rm == 0b111) rm = registers_.ReadCsr(0x002);
 
   uint64_t result;
   uint8_t fcsr_status = 0;
@@ -846,12 +866,14 @@ void RVSSVM::pipeline_execute_double() {
   }
 
   ex_mem_next.alu_ans = result;
-
-  
-  if (id_ex_reg.signals.mem_write_) {
-      ex_mem_next.data = registers_.ReadFpr(rs2);
-  }
+  ex_mem_next.data = val2;
+  ex_mem_next.des_address = id_ex_reg.rd;
+  ex_mem_next.funct3 = id_ex_reg.funct3;
+  ex_mem_next.signals = id_ex_reg.signals;
+  ex_mem_next.instruction_bits = id_ex_reg.instruction_bits;
+  ex_mem_next.valid = true;
 }
+
 
 void RVSSVM::ExecuteCsr() {
   uint8_t rs1 = (current_instruction_ >> 15) & 0b11111;
@@ -1745,7 +1767,7 @@ void RVSSVM::Run_Pipelined() {
     if (instructions_retired_ > vm_config::config.getInstructionExecutionLimit())
       break;
     Clocktick(); // Runs one full pipeline cycle
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
   // --- Pipeline flush loop ---
@@ -1753,7 +1775,7 @@ void RVSSVM::Run_Pipelined() {
   while (running_ && !stop_requested_ && flush_cycles >= 0) {
       Clocktick();
       flush_cycles--;
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      // std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
   running_ = false;

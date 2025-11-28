@@ -10,6 +10,7 @@
 #include "registers.h"
 #include "memory_controller.h"
 #include "alu.h"
+#include "branch_prediction_unit.h"
 
 #include "vm_asm_mw.h"
 
@@ -59,7 +60,7 @@ public:
     std::string output_status_;
 
     
-
+    BranchPredictionUnit bpu_;
 
 
     MemoryController memory_controller_;

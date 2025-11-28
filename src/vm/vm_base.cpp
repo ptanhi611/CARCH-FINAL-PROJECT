@@ -248,10 +248,16 @@ void VmBase::PrintString(uint64_t address) {
 
 void VmBase::DumpState(const std::filesystem::path &filename) {
     std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error opening file for dumping VM state: " << filename.string() << std::endl;
-        return;
-    }
+    if (!file.is_open()) return;
+
+    double bpu_acc = bpu_.getAccuracy(); // Get current accuracy
+
+    file << "{\n";
+    file << "  \"cycle\": " << cycle_s_ << ",\n";
+    file << "  \"pc\": " << program_counter_ << ",\n";
+ 
+    file << "  \"bpu_accuracy\": " << bpu_acc << ",\n"; 
+    file << "  \"program_counter_hex\": \"0x" << std::hex << program_counter_ << std::dec << "\",\n";
 
     unsigned int instruction_number = program_counter_ / 4;
     unsigned int current_line = program_.instruction_number_line_number_mapping[instruction_number];
